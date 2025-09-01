@@ -1,0 +1,20 @@
+# Generated outputs (regenerated automatically)
+output/
+drawio/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*~
+
+# Analysis files (development only)
+analysis/
+
+# Log files
+*.log
+
+# Note: Source files in generate-sequence-diagrams/ are tracked in git

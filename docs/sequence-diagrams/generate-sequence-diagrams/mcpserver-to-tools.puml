@@ -1,0 +1,207 @@
+@startuml mcpserver-to-tools
+!define ARKSTYLE
+!include <awslib/AWSCommon>
+!include <awslib/ApplicationIntegration/APIGateway>
+
+' Define color scheme for ARK components
+!define ARK_PRIMARY #2E86AB
+!define ARK_SECONDARY #A23B72
+!define ARK_ACCENT #F18F01
+!define ARK_SUCCESS #C73E1D
+!define ARK_NEUTRAL #F4F4F4
+
+' Title and header information
+title **MCPServer to Tools Discovery & Execution Flow**\n//ARK Platform v0.1.31 - Model Context Protocol Integration//
+
+' Define participants with proper styling
+participant "MCP Server\nController" as Controller ARK_PRIMARY
+participant "MCP Client" as MCPClient ARK_SECONDARY
+participant "External\nMCP Server" as MCPServer ARK_ACCENT
+participant "Tool\nRegistry" as Registry ARK_SUCCESS
+participant "Agent" as Agent ARK_NEUTRAL
+participant "Kubernetes\nAPI" as K8s #lightblue
+
+' Main MCP Server to Tools flow
+note over Controller, K8s
+**Complete MCPServer to Tools Integration**
+Discovery, CRD creation, registration, and execution via Model Context Protocol
+end note
+
+== 1. MCPServer CRD Processing & Connection ==
+Controller -> Controller : Reconcile(ctx, req) - MCPServer CRD
+activate Controller
+
+Controller -> Controller : processServer(ctx, mcpServer)
+note right of Controller : State machine:\nDiscovering → Ready/Error
+
+Controller -> Controller : BuildMCPServerURL(ctx, k8sClient, mcpServerCRD)
+note right of Controller : Resolve ValueSource:\n- Direct value\n- ServiceRef\n- Secret reference
+
+alt if ServiceRef
+    Controller -> K8s : Get Service for address resolution
+    K8s -> Controller : Service with IP/DNS + port
+else if Secret reference
+    Controller -> K8s : Get Secret for credentials
+    K8s -> Controller : Secret data for authentication
+end
+
+Controller -> MCPClient : NewMCPClient(baseURL)
+activate MCPClient
+
+MCPClient -> MCPServer : Initialize connection
+activate MCPServer
+note right of MCPServer : Model Context Protocol handshake\nCapabilities negotiation
+
+alt if connection successful
+    MCPServer -> MCPClient : Connection established
+    note right of MCPClient : MCP protocol initialized
+else connection failed
+    MCPServer -> MCPClient : Connection error
+    MCPClient -> Controller : Connection failure
+    Controller -> Controller : setCondition(MCPServerReady, false)
+    note over Controller : Update status and requeue
+end
+
+== 2. Tool Discovery via MCP Protocol ==
+Controller -> MCPClient : ListTools(ctx)
+note right of MCPClient : MCP protocol: list_tools request
+
+MCPClient -> MCPServer : ListToolsRequest
+MCPServer -> MCPServer : Enumerate available tools
+note right of MCPServer : Server-specific tool catalog:\n- Function definitions\n- Input schemas\n- Descriptions
+
+MCPServer -> MCPClient : ListToolsResponse
+note right of MCPClient : Array of mcp.Tool objects:\n- Name, description\n- InputSchema (JSON Schema)\n- Tool-specific metadata
+
+alt if ListTools successful
+    MCPClient -> Controller : []mcp.Tool
+    note right of Controller : Tool discovery complete
+else ListTools failed
+    MCPClient -> Controller : Error
+    Controller -> Controller : setCondition(MCPServerReady, false)
+    note over Controller : Handle discovery failure
+end
+
+== 3. Tool CRD Creation & Management ==
+Controller -> Controller : createTools(ctx, mcpServer, mcpTools)
+
+Controller -> K8s : List existing Tool CRDs for MCPServer
+activate K8s
+K8s -> Controller : Existing Tool CRDs with labels
+deactivate K8s
+
+loop for each mcp.Tool
+    Controller -> Controller : generateToolName(mcpServerName, toolName)
+    note right of Controller : Create unique tool name:\n"mcpserver-toolname" pattern
+    
+    Controller -> Controller : buildToolCRD(mcpServer, mcpTool, toolName)
+    note right of Controller : Create Tool CRD with:\n- Type: "mcp"\n- InputSchema from MCP\n- MCPServerRef\n- Controller reference
+    
+    Controller -> K8s : Create or Update Tool CRD
+    K8s -> Controller : Tool CRD created/updated
+    note right of Controller : Tool available in cluster
+end
+
+' Cleanup orphaned tools
+Controller -> Controller : Delete zombie tools
+note right of Controller : Remove tools no longer in MCP server
+
+Controller -> Controller : finalizeMCPServerProcessing(ctx, mcpServer, toolCount)
+Controller -> Controller : setCondition(MCPServerReady, true)
+
+deactivate MCPClient
+deactivate MCPServer
+
+== 4. Tool Registration in Agent Lifecycle ==
+Agent -> Agent : Initialize agent with tool refs
+note right of Agent : Agent CRD specifies tool names
+
+Agent -> K8s : Get Tool CRDs by name
+activate K8s
+K8s -> Agent : Tool CRD definitions
+deactivate K8s
+
+Agent -> Registry : RegisterTool(def, MCPExecutor)
+activate Registry
+note right of Registry : Create MCPExecutor with:\n- MCPClient reference\n- Tool name for MCP calls
+
+Registry -> Registry : Store tool definition and executor
+note right of Registry : Tool available for agent execution
+
+deactivate Registry
+
+== 5. Tool Execution During Agent Processing ==
+Agent -> Agent : Process LLM response with tool calls
+note right of Agent : LLM requests tool execution
+
+Agent -> Registry : ExecuteTool(ctx, toolCall)
+activate Registry
+
+Registry -> Registry : Find MCPExecutor for tool
+Registry -> MCPClient : Execute via MCPExecutor
+activate MCPClient
+
+MCPClient -> MCPClient : Parse tool arguments
+note right of MCPClient : json.Unmarshal tool call arguments
+
+MCPClient -> MCPServer : CallTool(ctx, CallToolRequest)
+activate MCPServer
+note right of MCPServer : MCP protocol: call_tool request\nwith tool name and arguments
+
+MCPServer -> MCPServer : Execute tool logic
+note right of MCPServer : Server-specific tool implementation:\n- File operations\n- API calls\n- Database queries\n- External integrations
+
+MCPServer -> MCPClient : CallToolResponse
+note right of MCPClient : Response content:\n- Text content\n- Error information\n- Structured data
+
+deactivate MCPServer
+
+MCPClient -> MCPClient : Process response content
+note right of MCPClient : Convert MCP response to ToolResult:\n- Extract text content\n- Handle structured responses\n- Format for agent consumption
+
+MCPClient -> Registry : ToolResult
+deactivate MCPClient
+
+Registry -> Agent : Tool execution result
+deactivate Registry
+
+Agent -> Agent : Continue processing with tool result
+note right of Agent : Incorporate tool result into conversation
+
+== 6. Error Handling & Recovery ==
+note over Controller, K8s : **Error Scenarios**
+
+alt if MCP Server unavailable
+    Controller -> MCPClient : Connection attempt
+    MCPClient -> Controller : Connection timeout/error
+    Controller -> Controller : setCondition(MCPServerReady, false, "ServerUnavailable")
+    Controller -> K8s : Delete all associated Tool CRDs
+end
+
+alt if Tool execution fails
+    MCPClient -> MCPServer : CallTool request
+    MCPServer -> MCPClient : Error response
+    MCPClient -> Registry : ToolResult with error
+    Registry -> Agent : Error result for handling
+end
+
+alt if Tool discovery fails
+    MCPClient -> MCPServer : ListTools request
+    MCPServer -> MCPClient : Error response
+    Controller -> Controller : Keep existing tools, schedule retry
+end
+
+deactivate Controller
+
+note over Controller, K8s
+**Key Features:**
+• **MCP Protocol Compliance**: Full Model Context Protocol implementation
+• **Dynamic Tool Discovery**: Automatic detection of server capabilities  
+• **CRD Lifecycle Management**: Tool CRDs created, updated, and cleaned up
+• **Connection Resilience**: Automatic reconnection and error recovery
+• **Schema Validation**: JSON Schema validation for tool inputs
+• **Controller References**: Proper ownership and garbage collection
+• **Polling & Updates**: Configurable discovery intervals
+end note
+
+@enduml

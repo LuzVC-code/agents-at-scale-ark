@@ -1,0 +1,162 @@
+@startuml team-round-robin-strategy
+!define ARKSTYLE
+!include <awslib/AWSCommon>
+!include <awslib/ApplicationIntegration/APIGateway>
+
+' Define color scheme for ARK components
+!define ARK_PRIMARY #2E86AB
+!define ARK_SECONDARY #A23B72
+!define ARK_ACCENT #F18F01
+!define ARK_SUCCESS #C73E1D
+!define ARK_NEUTRAL #F4F4F4
+
+' Title and header information
+title **Team Round-Robin Strategy Flow**\n//ARK Platform v0.1.31 - Cyclical Team Member Execution//
+
+' Define participants with proper styling
+participant "Query\nController" as QC ARK_PRIMARY
+participant "Team" as Team ARK_SECONDARY
+participant "Operation\nTracker" as OT ARK_SUCCESS
+participant "Execution\nRecorder" as ER ARK_ACCENT
+participant "Agent A" as AgentA ARK_NEUTRAL
+participant "Agent B" as AgentB ARK_NEUTRAL
+participant "Agent C" as AgentC ARK_NEUTRAL
+participant "Terminate\nHandler" as TH #lightblue
+
+' Main round-robin execution flow
+note over QC, TH
+**Round-Robin Strategy: Continuous Cycling Through Team Members**
+Executes all members in sequence repeatedly until maxTurns limit or termination
+end note
+
+== 1. Team Configuration & Validation ==
+QC -> Team : Execute(ctx, userInput, history)
+activate Team
+
+Team -> Team : Validate round-robin configuration
+note right of Team : Check strategy == "round-robin"\nValidate maxTurns is set\nEnsure members list not empty
+
+Team -> Team : Initialize execution state
+note right of Team : messages = slices.Clone(history)\nnewMessages = []\nturn = 0
+
+== 2. Round-Robin Execution Loop ==
+loop Infinite cycling until maxTurns or termination
+    alt if ctx.Err() != nil
+        Team -> QC : Return context cancellation error
+        note right of Team : Handle graceful shutdown
+    end
+    
+    Team -> ER : NewExecutionRecorder(t.Recorder)
+    activate ER
+    Team -> ER : TeamTurn(ctx, "Start", teamName, strategy, turn)
+    note right of ER : Record turn start event with metadata:\n- strategy: "round-robin"\n- turn: current turn number
+    
+    == 3. Sequential Member Execution Within Turn ==
+    loop for each member in t.Members
+        alt if ctx.Err() != nil
+            Team -> QC : Return context cancellation error
+            note right of Team : Check cancellation before each member
+        end
+        
+        Team -> Team : executeMemberAndAccumulate(ctx, member, userInput, &messages, &newMessages, i)
+        note right of Team : Execute member with:\n- Current conversation state\n- Accumulated history\n- Member index for tracking
+        
+        alt if Agent A turn
+            Team -> AgentA : Execute(ctx, userInput, messages)
+            activate AgentA
+            AgentA -> AgentA : Process with current context
+            AgentA -> Team : member messages
+            deactivate AgentA
+            Team -> Team : Accumulate Agent A messages
+            note right of Team : messages = append(messages, memberMessages...)\nnewMessages = append(newMessages, memberMessages...)
+            
+        else if Agent B turn
+            Team -> AgentB : Execute(ctx, userInput, messages)
+            activate AgentB
+            AgentB -> AgentB : Process with updated context
+            AgentB -> Team : member messages
+            deactivate AgentB
+            Team -> Team : Accumulate Agent B messages
+            
+        else if Agent C turn
+            Team -> AgentC : Execute(ctx, userInput, messages)
+            activate AgentC
+            AgentC -> AgentC : Process with full context
+            AgentC -> Team : member messages
+            deactivate AgentC
+            Team -> Team : Accumulate Agent C messages
+        end
+        
+        == 4. Termination Check ==
+        alt if IsTerminateTeam(err)
+            Team -> TH : Handle team termination
+            activate TH
+            note right of TH : Terminate tool called by member\nGraceful execution end
+            TH -> ER : Record termination event
+            TH -> Team : Return newMessages (no error)
+            deactivate TH
+            Team -> QC : Final accumulated messages
+            note over QC : Early termination - successful completion
+        else if other error
+            Team -> QC : Return execution error
+            note over QC : Error handling - propagate failure
+        end
+    end
+    
+    deactivate ER
+    
+    == 5. Turn Completion & MaxTurns Check ==
+    Team -> Team : turn++
+    note right of Team : Increment turn counter after full cycle
+    
+    alt if t.MaxTurns != nil && turn >= *t.MaxTurns
+        Team -> ER : TeamTurn(ctx, "MaxTurns", teamName, strategy, turn)
+        activate ER
+        note right of ER : Record maxTurns reached event
+        ER -> Team : Event recorded
+        deactivate ER
+        
+        Team -> QC : Return error: "team round-robin MaxTurns reached"
+        note over QC : Controlled termination due to turn limit
+    else
+        note right of Team : Continue to next turn\nCycle through all members again
+    end
+end
+
+deactivate Team
+
+note over QC, TH
+**Key Features:**
+• **Continuous Cycling**: All members execute in sequence repeatedly
+• **Turn-based Control**: Each turn processes all members once
+• **MaxTurns Protection**: Prevents infinite execution loops
+• **Context Accumulation**: Each member receives full conversation history
+• **Graceful Termination**: Supports early exit via terminate tool
+• **Cancellation Support**: Respects context cancellation at multiple points
+• **Event Tracking**: Records turn starts, completions, and terminations
+end note
+
+== Alternative Execution Scenarios ==
+
+note over QC, TH : **Scenario 1: Normal MaxTurns Completion**
+
+QC -> Team : 3 turns configured (maxTurns: 3)
+Team -> Team : Turn 0: A→B→C execute
+Team -> Team : Turn 1: A→B→C execute  
+Team -> Team : Turn 2: A→B→C execute
+Team -> QC : MaxTurns reached after 9 total executions
+
+note over QC, TH : **Scenario 2: Early Termination**
+
+QC -> Team : Turn 0: A→B execute
+Team -> AgentC : Execute with terminate tool call
+AgentC -> TH : Call terminate team
+Team -> QC : Return messages (turn 0 incomplete)
+
+note over QC, TH : **Scenario 3: Error Handling**
+
+QC -> Team : Turn 0: A→B execute normally
+Team -> AgentC : Execute fails with error
+Team -> QC : Return error (preserve accumulated messages)
+
+@enduml

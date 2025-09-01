@@ -1,0 +1,162 @@
+@startuml external-execution-engine-langchain
+!define ARKSTYLE
+!include <awslib/AWSCommon>
+!include <awslib/ApplicationIntegration/APIGateway>
+!include <awslib/Compute/Lambda>
+
+' Define color scheme for ARK components
+!define ARK_PRIMARY #2E86AB
+!define ARK_SECONDARY #A23B72
+!define ARK_ACCENT #F18F01
+!define ARK_SUCCESS #C73E1D
+!define ARK_NEUTRAL #F4F4F4
+
+' Title and header information
+title **External Execution Engine (LangChain) Flow**\n//ARK Platform v0.1.31 - Kubernetes-native Multi-Agent Orchestration//
+
+' Define participants with proper styling
+participant "Query\nController" as QC ARK_PRIMARY
+participant "Agent" as Agent ARK_SECONDARY
+participant "ExecutionEngine\nClient" as EEC ARK_ACCENT
+participant "Operation\nTracker" as OT ARK_SUCCESS
+participant "Kubernetes\nAPI" as K8s #lightblue
+participant "LangChain\nService" as LCS ARK_ACCENT
+participant "External\nLLM" as LLM #lightgreen
+
+' Main execution flow
+note over QC, LLM
+**External Execution Engine Flow with LangChain Integration**
+Supports RAG, custom chains, and specialized processing capabilities
+end note
+
+== 1. Query Processing & Engine Detection ==
+QC -> Agent : Execute(ctx, userInput, history)
+activate Agent
+
+Agent -> Agent : Check ExecutionEngine configuration
+note right of Agent : if a.ExecutionEngine != nil && a.ExecutionEngine.Name != "a2a"
+
+Agent -> Agent : executeWithExecutionEngine(ctx, userInput, history)
+note right of Agent : Use external execution engine instead of built-in OpenAI
+
+== 2. Execution Engine Client Initialization ==
+Agent -> EEC : NewExecutionEngineClient(a.client)
+activate EEC
+note right of EEC : Creates HTTP client with 5-minute timeout
+
+Agent -> Agent : buildAgentConfig(a)
+note right of Agent : Build configuration for external engine
+
+Agent -> Agent : resolvePrompt(ctx)
+note right of Agent : Resolve template parameters in prompt
+
+Agent -> Agent : buildToolDefinitions(a.Tools)
+note right of Agent : Convert internal tools to engine format
+
+== 3. External Engine Communication ==
+Agent -> EEC : Execute(ctx, engineRef, agentConfig, userInput, history, tools, recorder)
+
+EEC -> OT : NewOperationTracker("Executor", engineName)
+activate OT
+note right of OT : Track engine execution with metadata
+
+EEC -> EEC : resolveExecutionEngineAddress(ctx, engineRef, namespace)
+note right of EEC : Get engine address from CRD status
+
+EEC -> K8s : Get ExecutionEngine CRD
+activate K8s
+K8s -> EEC : ExecutionEngine resource with status
+deactivate K8s
+note right of EEC : Validate address is resolved
+
+== 4. Message Format Conversion ==
+EEC -> EEC : convertToExecutionEngineMessage(userInput)
+note right of EEC : Convert internal Message format\nto ExecutionEngineMessage
+
+loop for each message in history
+    EEC -> EEC : convertToExecutionEngineMessage(msg)
+end
+note right of EEC : Convert conversation history
+
+EEC -> EEC : json.Marshal(ExecutionEngineRequest)
+note right of EEC : Prepare request payload:\n- Agent config\n- User input\n- History\n- Tools
+
+== 5. HTTP Request to LangChain Service ==
+EEC -> LCS : POST /execute (HTTP request)
+activate LCS
+note right of LCS : External LangChain execution engine\nSupports RAG, custom chains, specialized processing
+
+LCS -> LCS : Process agent configuration
+note right of LCS : Initialize LangChain agent with:\n- Model config\n- Tools\n- RAG settings (if enabled)
+
+alt if RAG enabled (label: langchain: rag)
+    LCS -> LCS : Index local Python files
+    note right of LCS : Build vector embeddings for code context
+    
+    LCS -> LCS : Retrieve relevant context
+    note right of LCS : Use embeddings model for context retrieval
+end
+
+LCS -> LCS : Initialize LangChain chain
+note right of LCS : Create appropriate chain type:\n- ConversationChain\n- RAGChain\n- CustomChain
+
+== 6. External LLM Processing ==
+LCS -> LLM : LangChain execution
+activate LLM
+note right of LLM : Process through LangChain framework:\n- Chat models\n- Embeddings\n- Vector stores\n- Retrievers
+
+LLM -> LCS : Model response
+deactivate LLM
+
+alt if tool calls required
+    LCS -> LCS : Process tool calls through LangChain
+    note right of LCS : Handle tools via LangChain framework
+end
+
+LCS -> LCS : Format response as ExecutionEngineResponse
+note right of LCS : Convert to standard format:\n- Messages array\n- Token usage\n- Error handling
+
+LCS -> EEC : ExecutionEngineResponse (JSON)
+deactivate LCS
+note right of EEC : Response includes:\n- Processed messages\n- Token usage statistics\n- Error information
+
+== 7. Response Processing & Format Conversion ==
+EEC -> EEC : json.NewDecoder(resp.Body).Decode()
+note right of EEC : Parse HTTP response
+
+alt if response.Error != ""
+    EEC -> OT : Fail(error)
+    EEC -> Agent : Return error
+else
+    alt if token usage available
+        EEC -> OT : CompleteWithTokens("", tokenUsage)
+        note right of OT : Track execution metrics
+    else
+        EEC -> OT : Complete("")
+    end
+    
+    loop for each message in response.Messages
+        EEC -> EEC : convertFromExecutionEngineMessage(msg)
+    end
+    note right of EEC : Convert back to internal Message format
+    
+    EEC -> Agent : []Message (converted response)
+end
+
+deactivate OT
+deactivate EEC
+
+Agent -> QC : Final response messages
+deactivate Agent
+
+note over QC, LLM
+**Key Features:**
+• Supports LangChain framework integration
+• RAG capabilities with code indexing
+• Custom chain implementations
+• External LLM model flexibility
+• Token usage tracking
+• Error handling and timeout management
+end note
+
+@enduml

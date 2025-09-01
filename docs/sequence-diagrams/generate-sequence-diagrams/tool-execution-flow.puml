@@ -1,0 +1,197 @@
+@startuml Tool Execution Flow - ARK Platform
+
+title ARK Tool Execution - Detailed Flow
+
+!define ARKCOLOR #1E88E5
+!define SUCCESSCOLOR #4CAF50
+!define ERRORCOLOR #F44336
+!define PROCESSCOLOR #FF9800
+
+actor "Agent" as Agent ARKCOLOR
+participant "ToolRegistry" as TR ARKCOLOR
+participant "ToolExecutor" as TE ARKCOLOR
+participant "HTTPExecutor" as HTTP PROCESSCOLOR
+participant "MCPExecutor" as MCP PROCESSCOLOR
+participant "ExternalAPI" as ExtAPI PROCESSCOLOR
+participant "MCPServer" as MCPSrv PROCESSCOLOR
+participant "K8sClient" as K8s ARKCOLOR
+participant "EventRecorder" as ER ARKCOLOR
+
+== Tool Call Initiation ==
+
+Agent -> Agent : LLM returns tool calls in response
+note right of Agent : ChatCompletion response contains tool_calls[]
+
+Agent -> Agent : executeToolCalls(ctx, toolCalls, agentMessages, newMessages)
+
+loop For each tool call
+    Agent -> Agent : executeToolCall(ctx, toolCall)
+    
+    Agent -> TR : ExecuteTool(ctx, toolCall)
+    activate TR
+    note right of TR : Registry manages tool definitions and executors
+    
+    TR -> TR : Find executor by tool name
+    note right of TR : Look up in executors map[string]ToolExecutor
+    
+    alt Tool not found
+        TR -> Agent : ToolResult{Error: "tool not found"}
+        note right of TR : Return error immediately
+    end
+    
+    TR -> TE : Execute(ctx, toolCall)
+    activate TE
+    note right of TE : Delegate to specific executor implementation
+    
+    == Tool Type Resolution & Execution ==
+    
+    alt HTTP Tool
+        TR -> HTTP : Execute(ctx, toolCall)
+        activate HTTP
+        note right of HTTP : HTTPExecutor handles RESTful API calls
+        
+        HTTP -> K8s : Get Tool CRD
+        activate K8s
+        K8s -> HTTP : Tool specification with HTTP config
+        deactivate K8s
+        
+        HTTP -> HTTP : Resolve URL template with parameters
+        note right of HTTP : Template substitution from toolCall.Function.Arguments
+        
+        HTTP -> HTTP : Resolve headers from ConfigMaps/Secrets
+        note right of HTTP : Support for authentication headers
+        
+        HTTP -> HTTP : Build HTTP request (GET/POST/PUT/DELETE)
+        note right of HTTP : Method, body, headers configuration
+        
+        HTTP -> ExtAPI : HTTP Request
+        activate ExtAPI
+        note right of ExtAPI : External REST API (DuckDuckGo, etc.)
+        
+        ExtAPI -> HTTP : HTTP Response
+        deactivate ExtAPI
+        
+        HTTP -> HTTP : Process response (status, body parsing)
+        note right of HTTP : Handle success/error responses
+        
+        HTTP -> TR : ToolResult{Content: response_body}
+        deactivate HTTP
+        
+    else MCP Tool
+        TR -> MCP : Execute(ctx, toolCall)
+        activate MCP
+        note right of MCP : MCPExecutor handles Model Context Protocol
+        
+        MCP -> K8s : Get Tool CRD
+        activate K8s
+        K8s -> MCP : Tool specification with MCP config
+        deactivate K8s
+        
+        MCP -> K8s : Get MCPServer CRD
+        activate K8s
+        K8s -> MCP : MCPServer configuration (URL, headers, transport)
+        deactivate K8s
+        
+        MCP -> MCP : BuildMCPServerURL(ctx, k8sClient, mcpServerCRD)
+        note right of MCP : Resolve service/ingress address
+        
+        MCP -> MCP : Resolve headers from ConfigMaps/Secrets
+        note right of MCP : Authentication and custom headers
+        
+        MCP -> MCP : Create/reuse MCP client connection
+        note right of MCP : Connection pooling for efficiency
+        
+        MCP -> MCPSrv : MCP Protocol Request
+        activate MCPSrv
+        note right of MCPSrv : Model Context Protocol communication
+        
+        MCPSrv -> MCPSrv : Process tool request
+        note right of MCPSrv : Tool-specific logic execution
+        
+        MCPSrv -> MCP : MCP Protocol Response
+        deactivate MCPSrv
+        
+        MCP -> MCP : Parse MCP response format
+        note right of MCP : Extract content and handle errors
+        
+        MCP -> TR : ToolResult{Content: mcp_response}
+        deactivate MCP
+        
+    else Kubernetes Tool
+        TR -> TE : Execute(ctx, toolCall)
+        note right of TE : Native Kubernetes resource operations
+        
+        TE -> K8s : Kubernetes API operations
+        activate K8s
+        note right of K8s : kubectl-like functionality
+        
+        K8s -> TE : Kubernetes resource response
+        deactivate K8s
+        
+        TE -> TR : ToolResult{Content: k8s_response}
+        
+    else Built-in Tool
+        alt Noop Tool
+            TR -> TR : NoopExecutor.Execute()
+            note right of TR : Testing/placeholder tool
+            TR -> TR : Return success message
+            
+        else Terminate Tool
+            TR -> TR : TerminateExecutor.Execute()
+            note right of TR : Conversation termination signal
+            TR -> TR : Return termination message
+        end
+        
+        TR -> Agent : ToolResult{Content: builtin_response}
+    end
+    
+    deactivate TE
+    
+    == Tool Result Processing ==
+    
+    TR -> Agent : ToolResult{ID, Name, Content, Error}
+    deactivate TR
+    
+    Agent -> Agent : Create tool message from result
+    note right of Agent : Convert ToolResult to Message format
+    
+    Agent -> Agent : Add tool message to conversation
+    note right of Agent : Append to agentMessages and newMessages
+    
+    Agent -> ER : Emit tool execution event
+    activate ER
+    ER -> ER : Record tool execution telemetry
+    deactivate ER
+    
+    alt Tool execution error
+        Agent -> Agent : Include error in tool message
+        note right of Agent : Error handling continues conversation
+    end
+end
+
+Agent -> Agent : Continue LLM loop with tool results
+note right of Agent : Next LLM call includes tool responses
+
+== Tool Registry Management ==
+
+note over TR : Tool Registration Process
+note over TR : - RegisterTool(definition, executor)
+note over TR : - GetToolDefinitions() for LLM schema
+note over TR : - ToOpenAITools() format conversion
+note over TR : - GetToolType() for categorization
+
+== Error Handling ==
+
+note over Agent, ExtAPI : Error Scenarios
+note over HTTP : - HTTP API failures (404, 500, timeout)
+note over HTTP : - Authentication failures
+note over HTTP : - Invalid response format
+note over MCP : - MCP server connectivity issues
+note over MCP : - Protocol version mismatches
+note over MCP : - Tool not found on MCP server
+note over K8s : - Kubernetes API errors
+note over K8s : - RBAC permission failures
+note over TR : - Tool definition validation errors
+note over TR : - Executor creation failures
+
+@enduml

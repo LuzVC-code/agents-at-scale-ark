@@ -1,0 +1,257 @@
+@startuml Basic Query Execution - ARK Platform
+
+title ARK Basic Query Execution - Complete Flow
+
+!define ARKCOLOR #1E88E5
+!define SUCCESSCOLOR #4CAF50
+!define ERRORCOLOR #F44336
+!define PROCESSCOLOR #FF9800
+
+actor "Client/User" as Client
+participant "QueryReconciler" as QR ARKCOLOR
+participant "ImpersonatedClient" as IC ARKCOLOR
+participant "MemoryInterface" as Memory ARKCOLOR
+participant "Agent" as Agent ARKCOLOR
+participant "Model" as Model ARKCOLOR
+participant "ToolRegistry" as TR ARKCOLOR
+participant "ExecutionEngine" as EE ARKCOLOR
+participant "LLMProvider" as LLM ARKCOLOR
+participant "TokenCollector" as TC ARKCOLOR
+participant "EventRecorder" as ER ARKCOLOR
+
+== Query Creation & Initial Reconciliation ==
+
+Client -> QR : Create Query Resource
+activate QR
+note right of QR : Kubernetes reconcile loop triggered
+
+QR -> QR : fetchQuery(ctx, namespacedName)
+QR -> QR : handleFinalizer(ctx, query)
+note right of QR : Add finalizer if not exists
+
+QR -> QR : handleQueryExecution(ctx, req, query)
+note right of QR : Check TTL expiry & cancel status
+
+alt Query Status: Default (New Query)
+    QR -> QR : updateStatus(ctx, query, "running")
+    QR -> QR : handleRunningPhase(ctx, req, query)
+    
+    QR -> QR : cleanupExistingOperation(namespacedName)
+    note right of QR : Cancel any existing operations
+    
+    QR -> TC : NewTokenUsageCollector(recorder)
+    activate TC
+    
+    QR -> QR : executeQueryAsync(opCtx, query, namespacedName, tracker, tokenCollector)
+    note right of QR : Async execution in goroutine
+    
+    == Query Setup Phase ==
+    
+    QR -> QR : setupQueryExecution(opCtx, query, queryTracker, tokenCollector, sessionId)
+    
+    QR -> QR : getClientForQuery(query)
+    QR -> IC : Create impersonated client
+    activate IC
+    note right of IC : RBAC impersonation for security
+    
+    QR -> Memory : NewMemoryForQuery(ctx, client, memorySpec, namespace, tokenCollector, sessionId)
+    activate Memory
+    note right of Memory : Initialize session-aware memory
+    
+    == Target Resolution & Execution ==
+    
+    QR -> QR : reconcileQueue(ctx, query, impersonatedClient, memory, tokenCollector)
+    
+    QR -> QR : resolveTargets(ctx, query, impersonatedClient)
+    note right of QR : Resolve direct targets + selectors
+    
+    alt Target Resolution: Direct Targets
+        QR -> QR : Process query.Spec.Targets
+    else Target Resolution: Label Selector
+        QR -> IC : List agents by selector
+        IC -> QR : AgentList
+        QR -> IC : List teams by selector  
+        IC -> QR : TeamList
+        QR -> IC : List models by selector
+        IC -> QR : ModelList
+        QR -> IC : List tools by selector
+        IC -> QR : ToolList
+    end
+    
+    == Parallel Target Execution ==
+    
+    loop for each target
+        QR -> QR : executeTarget(ctx, query, target, impersonatedClient, memory, tokenCollector)
+        note right of QR : Goroutine per target
+        
+        QR -> QR : Create execution timeout context
+        note right of QR : Default: 5 minutes
+        
+        alt Target Type: Agent
+            QR -> QR : executeAgent(ctx, query, agentName, impersonatedClient, memory, tokenCollector)
+            
+            QR -> IC : Get(ctx, agentKey, agentCRD)
+            IC -> QR : Agent CRD
+            
+            QR -> Agent : MakeAgent(ctx, impersonatedClient, agentCRD, tokenCollector)
+            activate Agent
+            
+            QR -> Memory : loadInitialMessages(ctx, memory)
+            Memory -> QR : Historical messages
+            
+            QR -> QR : ResolveQueryInput(ctx, client, namespace, input, parameters)
+            note right of QR : Template parameter resolution
+            
+            QR -> Agent : Execute(ctx, userMessage, historyMessages)
+            
+            == Agent Execution Flow ==
+            
+            Agent -> Agent : Validate model configuration
+            alt Model not configured
+                Agent -> QR : Error: "agent has no model configured"
+            end
+            
+            Agent -> TC : NewOperationTracker("AgentExecution", agentName)
+            note right of TC : Track execution metrics
+            
+            alt Execution Engine: External
+                Agent -> Agent : executeWithExecutionEngine(ctx, userInput, history)
+                
+                Agent -> EE : resolveExecutionEngineAddress(ctx, engineRef, defaultNamespace)
+                activate EE
+                EE -> Agent : Engine address
+                
+                Agent -> Agent : buildAgentConfig(agent)
+                Agent -> Agent : buildToolDefinitions(tools)
+                
+                Agent -> EE : Execute(ctx, engineRef, agentConfig, userInput, history, tools, recorder)
+                EE -> LLM : External engine call
+                activate LLM
+                LLM -> EE : Response
+                deactivate LLM
+                EE -> Agent : Response messages
+                deactivate EE
+                
+            else Execution Engine: Built-in (Default)
+                Agent -> Agent : executeLocally(ctx, userInput, history)
+                
+                Agent -> Agent : prepareMessages(ctx, userInput, history)
+                note right of Agent : Combine system prompt + history + user input
+                
+                Agent -> Model : Resolve model reference
+                activate Model
+                Model -> Agent : Model configuration
+                deactivate Model
+                
+                Agent -> TR : Load available tools
+                activate TR
+                TR -> Agent : Tool definitions
+                
+                Agent -> Agent : executeModelCall(ctx, agentMessages, tools)
+                
+                Agent -> LLM : ChatCompletion request
+                activate LLM
+                note right of LLM : OpenAI-compatible API call
+                LLM -> Agent : ChatCompletion response
+                deactivate LLM
+                
+                Agent -> TC : Record token usage
+                TC -> ER : Emit token usage event
+                activate ER
+                deactivate ER
+                
+                alt Response contains tool calls
+                    loop for each tool call
+                        Agent -> Agent : executeToolCall(ctx, toolCall)
+                        Agent -> TR : ExecuteTool(ctx, toolCall)
+                        TR -> TR : Find tool executor
+                        
+                        alt Tool Type: HTTP
+                            TR -> TR : HTTP request to external API
+                        else Tool Type: MCP
+                            TR -> TR : MCP protocol call
+                        end
+                        
+                        TR -> Agent : Tool execution result
+                        Agent -> Agent : Process tool response
+                        
+                        Agent -> LLM : Follow-up call with tool results
+                        activate LLM
+                        LLM -> Agent : Final response
+                        deactivate LLM
+                    end
+                end
+                
+                deactivate TR
+            end
+            
+            Agent -> Agent : processAssistantMessage(choice)
+            Agent -> QR : Response messages
+            deactivate Agent
+            
+            QR -> Memory : AddMessages(ctx, newMessages)
+            note right of Memory : Save user message + responses
+            
+        else Target Type: Team
+            QR -> QR : executeTeam(ctx, query, teamName, impersonatedClient, memory, tokenCollector)
+            note right of QR : Team orchestration flow
+            
+        else Target Type: Model
+            QR -> QR : executeModel(ctx, query, modelName, impersonatedClient, memory, tokenCollector)
+            note right of QR : Direct model interaction
+            
+        else Target Type: Tool
+            QR -> QR : executeTool(ctx, query, toolName, impersonatedClient, tokenCollector)
+            note right of QR : Direct tool execution
+        end
+        
+        QR -> TC : EmitEvent(ctx, "TargetExecutionSuccess", event)
+    end
+    
+    == Response Assembly & Status Update ==
+    
+    QR -> QR : Collect all target responses
+    QR -> TC : GetTokenSummary()
+    TC -> QR : Token usage summary
+    
+    QR -> QR : Update query.Status.Responses
+    QR -> QR : Update query.Status.TokenUsage
+    
+    == Evaluation Phase (Optional) ==
+    
+    QR -> QR : resolveEvaluators(ctx, query, impersonatedClient)
+    
+    alt Evaluators exist
+        QR -> QR : updateStatus(ctx, query, "evaluating")
+        QR -> QR : executeEvaluation(ctx, query, namespacedName, tokenCollector)
+        note right of QR : Separate evaluation flow
+    else No evaluators
+        QR -> QR : updateStatus(ctx, query, "done")
+    end
+    
+    deactivate Memory
+    deactivate IC
+    deactivate TC
+    
+else Query Status: Running/Evaluating
+    QR -> QR : Check existing operation
+    note right of QR : Skip if already running
+    
+else Query Status: Done/Error
+    QR -> QR : Schedule TTL cleanup
+    note right of QR : Requeue after TTL expiry
+end
+
+QR -> Client : Reconcile result
+deactivate QR
+
+== Error Handling ==
+
+note over QR, LLM : Global Error Handling
+note over QR : - Timeout handling (5 min default)
+note over QR : - Operation cleanup on cancellation  
+note over QR : - Event recording for observability
+note over QR : - Token usage tracking
+note over QR : - Telemetry spans for tracing
+
+@enduml

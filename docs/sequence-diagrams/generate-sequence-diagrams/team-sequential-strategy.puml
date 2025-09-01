@@ -1,0 +1,207 @@
+@startuml
+title Team Sequential Strategy Execution Flow - ARK Platform
+
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+participant QueryController as QC
+participant Team as T
+participant "OperationTracker\n(TeamExecution)" as TT
+participant "OperationTracker\n(TeamMember)" as MT1
+participant "OperationTracker\n(TeamMember)" as MT2
+participant "OperationTracker\n(TeamMember)" as MT3
+participant "TeamMember[0]" as M1
+participant "TeamMember[1]" as M2  
+participant "TeamMember[2]" as M3
+participant EventEmitter as EE
+participant TokenUsageCollector as TUC
+
+note over QC, TUC
+    Team Sequential Strategy: Orchestrates multiple team members in sequence,
+    each member receives accumulated messages from previous members
+end note
+
+== Team Execution Initialization ==
+QC -> T : Execute(ctx, userInput, history)
+activate T
+
+T -> T : Validate Members
+note right T
+    if len(t.Members) == 0 {
+        return error
+    }
+end note
+
+T -> TT : NewOperationTracker("TeamExecution", teamName)
+activate TT
+note right TT
+    Metadata: strategy, queryId, sessionId,
+    teamName, memberCount
+end note
+
+T -> T : Strategy Selection
+note right T
+    switch t.Strategy {
+    case "sequential":
+        execFunc = t.executeSequential
+    case "round-robin":
+        execFunc = t.executeRoundRobin
+    case "selector":
+        execFunc = t.executeSelector
+    case "graph":
+        execFunc = t.executeGraph
+    }
+end note
+
+== Token Usage Tracking Setup ==
+T -> TUC : GetTokenSummary() (initial)
+TUC --> T : initialTokens
+
+== Sequential Execution Strategy ==
+T -> T : executeSequential(ctx, userInput, history)
+activate T
+
+T -> T : messages = slices.Clone(history)
+T -> T : var newMessages []Message
+
+loop for i, member := range t.Members
+    note over T, M1
+        Sequential execution with message accumulation
+        Each member gets full conversation history
+    end note
+    
+    == Context Validation ==
+    T -> T : Check ctx.Err()
+    alt Context Cancelled
+        T --> T : return newMessages, ctx.Err()
+    end
+    
+    == Member Execution (Member 1) ==
+    T -> MT1 : NewOperationTracker("TeamMember", member.GetName())
+    activate MT1
+    note right MT1
+        Metadata: team, memberType, turn,
+        queryId, sessionId, strategy
+    end note
+    
+    T -> M1 : Execute(ctx, userInput, messages)
+    activate M1
+    
+    note over M1
+        Member can be Agent or Sub-Team
+        Executes with full accumulated context
+    end note
+    
+    M1 --> T : memberNewMessages
+    deactivate M1
+    
+    alt Execution Success
+        MT1 -> EE : Complete("")
+        T -> T : messages = append(messages, memberNewMessages...)
+        T -> T : newMessages = append(newMessages, memberNewMessages...)
+    else Execution Error
+        alt Terminate Team
+            MT1 -> EE : CompleteWithTermination(err.Error())
+        else Regular Error
+            MT1 -> EE : Fail(err)
+        end
+        note right T
+            Still accumulate messages even on error
+            for partial results
+        end note
+        T -> T : messages = append(messages, memberNewMessages...)
+        T -> T : newMessages = append(newMessages, memberNewMessages...)
+        T --> T : return newMessages, err
+    end
+    deactivate MT1
+    
+    == Member Execution (Member 2) ==
+    T -> MT2 : NewOperationTracker("TeamMember", member.GetName())
+    activate MT2
+    
+    T -> M2 : Execute(ctx, userInput, messages)
+    note right M2 : Now includes Member 1 responses
+    activate M2
+    
+    M2 --> T : memberNewMessages
+    deactivate M2
+    
+    MT2 -> EE : Complete("")
+    T -> T : messages = append(messages, memberNewMessages...)
+    T -> T : newMessages = append(newMessages, memberNewMessages...)
+    deactivate MT2
+    
+    == Member Execution (Member 3) ==
+    T -> MT3 : NewOperationTracker("TeamMember", member.GetName())
+    activate MT3
+    
+    T -> M3 : Execute(ctx, userInput, messages)
+    note right M3 : Now includes Member 1+2 responses
+    activate M3
+    
+    M3 --> T : memberNewMessages
+    deactivate M3
+    
+    MT3 -> EE : Complete("")
+    T -> T : messages = append(messages, memberNewMessages...)
+    T -> T : newMessages = append(newMessages, memberNewMessages...)
+    deactivate MT3
+end
+
+T --> T : return newMessages, nil
+deactivate T
+
+== Token Usage Calculation ==
+T -> TUC : GetTokenSummary() (final)
+TUC --> T : finalTokens
+
+T -> T : Calculate Team Token Usage
+note right T
+    teamTokenUsage = TokenUsage{
+        PromptTokens: final - initial,
+        CompletionTokens: final - initial,
+        TotalTokens: final - initial
+    }
+end note
+
+== Team Execution Completion ==
+alt Execution Error
+    alt Terminate Team
+        TT -> EE : CompleteWithTermination(err.Error())
+    else Regular Error
+        TT -> EE : Fail(err)
+    end
+else Success
+    alt Has Token Usage
+        TT -> EE : CompleteWithTokens("", teamTokenUsage)
+    else No Token Usage
+        TT -> EE : Complete("")
+    end
+end
+
+deactivate TT
+T --> QC : newMessages
+deactivate T
+
+== Error Handling Scenarios ==
+note over T, EE
+    Error Scenarios:
+    1. No Members: "team has no members configured"
+    2. Unsupported Strategy: "unsupported strategy X for team Y"
+    3. Context Cancellation: Return partial results
+    4. Member Execution Error: Accumulate partial messages
+    5. Terminate Team: Graceful early termination
+end note
+
+== Team Member Types ==
+note over M1, M3
+    TeamMember Interface:
+    - Agent: Individual AI agent execution
+    - Sub-Team: Nested team execution (hierarchical)
+    
+    Each member implements:
+    - Execute(ctx, userInput, history) -> messages
+    - GetName() -> string
+    - GetType() -> string
+end note
+
+@enduml

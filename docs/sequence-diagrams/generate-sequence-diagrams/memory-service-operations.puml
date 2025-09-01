@@ -1,0 +1,258 @@
+@startuml
+title Memory Service Operations - ARK Platform
+
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+participant QueryController as QC
+participant MemoryInterface as MI
+participant "HTTPMemory" as HM
+participant "OperationTracker\n(MemoryGet/Add)" as MT
+participant MemoryController as MC
+participant PostgreSQLMemoryService as PMS
+participant PostgreSQLDB as PG
+participant EventEmitter as EE
+participant K8sClient as K8S
+
+note over QC, K8S
+    Memory Service: Provides persistent conversation storage through HTTP API
+    with PostgreSQL backend and session-based isolation
+end note
+
+== Memory Initialization for Query ==
+QC -> QC : Load Memory Reference from Query
+note right QC
+    Query can specify:
+    - memory.name: Specific Memory resource
+    - memory.sessionId: Session identifier
+    - No memory: Uses "default" or NoopMemory
+end note
+
+QC -> MI : NewMemoryForQuery(ctx, k8sClient, memoryRef, namespace, recorder, sessionId)
+activate MI
+
+MI -> K8S : Get Memory Resource by Name
+activate K8S
+K8S --> MI : Memory CRD with Address
+deactivate K8S
+
+MI -> HM : NewHTTPMemory(ctx, k8sClient, memoryName, namespace, recorder, config)
+activate HM
+
+HM -> K8S : Resolve Memory Address
+activate K8S
+note right K8S
+    Address resolution from Memory.spec.address:
+    - serviceRef: service-name:port
+    - value: direct URL
+    - secretRef/configMapRef: referenced values
+end note
+K8S --> HM : Resolved HTTP endpoint URL
+deactivate K8S
+
+HM --> MI : HTTPMemory instance
+deactivate HM
+MI --> QC : MemoryInterface
+deactivate MI
+
+== Get Conversation History ==
+QC -> HM : GetMessages(ctx)
+activate HM
+
+HM -> MT : NewOperationTracker("MemoryGetMessages", memoryName)
+activate MT
+
+HM -> HM : Resolve and Update Address
+note right HM
+    Dynamic address resolution checks:
+    - Current Memory resource status
+    - Service endpoint changes
+    - Updates baseURL if changed
+end note
+
+HM -> PMS : GET /messages/{sessionId}
+activate PMS
+
+PMS -> PG : SELECT * FROM ark_messages WHERE session_id = ? ORDER BY created_at
+activate PG
+PG --> PMS : Message rows (JSONB format)
+deactivate PG
+
+PMS -> PMS : Convert DB rows to JSON messages
+PMS --> HM : HTTP 200 + {"messages": [...]}
+deactivate PMS
+
+HM -> HM : Parse JSON Response
+HM -> HM : Convert to Message structs
+
+alt Success
+    MT -> EE : Complete("")
+    HM --> QC : []Message (conversation history)
+else HTTP Error
+    MT -> EE : Fail(error)
+    HM --> QC : error
+else No Messages
+    HM --> QC : []Message{} (empty history)
+end
+deactivate MT
+deactivate HM
+
+== Agent/Team Execution (with conversation context) ==
+QC -> QC : Append user input to history
+QC -> QC : Execute Agent/Team with full context
+note right QC
+    Agent executes with complete conversation history
+    from memory + current user input
+end note
+
+== Save New Messages to Memory ==
+QC -> HM : AddMessages(ctx, newMessages)
+activate HM
+
+HM -> MT : NewOperationTracker("MemoryAddMessages", memoryName)
+activate MT
+note right MT
+    Metadata: namespace, sessionId,
+    message count for tracking
+end note
+
+alt Empty Messages
+    HM --> QC : return nil (no-op)
+else Has Messages
+    HM -> HM : Resolve and Update Address
+    
+    HM -> HM : Convert Messages to OpenAI format
+    note right HM
+        openaiMessages := make([]openai.ChatCompletionMessageParamUnion, len(messages))
+        Serializes to JSON for HTTP request
+    end note
+    
+    HM -> PMS : PUT /messages/{sessionId} + JSON body
+    activate PMS
+    
+    PMS -> PMS : Parse JSON request
+    note right PMS
+        Request: {"messages": [
+            {"role": "user", "content": "..."},
+            {"role": "assistant", "content": "..."}
+        ]}
+    end note
+    
+    PMS -> PG : BEGIN TRANSACTION
+    activate PG
+    
+    loop for each message
+        PMS -> PG : INSERT INTO ark_messages (session_id, message, created_at) VALUES (?, ?, NOW())
+        note right PG
+            - session_id: Query UID for isolation
+            - message: JSONB chat completion message
+            - created_at: Timestamp for ordering
+        end note
+    end
+    
+    PMS -> PG : COMMIT TRANSACTION
+    PG --> PMS : Success
+    deactivate PG
+    
+    PMS --> HM : HTTP 200
+    deactivate PMS
+    
+    alt HTTP Success (200-299)
+        MT -> EE : Complete("")
+        HM --> QC : nil (success)
+    else HTTP Error
+        MT -> EE : Fail(HTTP error)
+        HM --> QC : error
+    end
+end
+deactivate MT
+deactivate HM
+
+== Memory Controller Lifecycle (Background) ==
+note over MC, K8S
+    Memory Controller manages Memory CRD lifecycle
+    and address resolution in background
+end note
+
+MC -> K8S : Watch Memory resources
+activate K8S
+
+loop Memory Resource Changes
+    K8S -> MC : Memory CRD event
+    activate MC
+    
+    MC -> MC : Reconcile Memory
+    note right MC
+        State machine:
+        - Running: Resolve address
+        - Ready: Address resolved
+        - Error: Resolution failed
+    end note
+    
+    MC -> K8S : Resolve Address Source
+    activate K8S
+    note right K8S
+        Address sources:
+        - Service: name:port -> ClusterIP:port
+        - Secret/ConfigMap: reference resolution
+        - Direct value: validate URL format
+    end note
+    K8S --> MC : Resolved address
+    deactivate K8S
+    
+    MC -> MC : Validate Address (HTTP URL)
+    
+    alt Address Valid
+        MC -> K8S : Update Memory.status.phase = "Ready"
+        MC -> K8S : Update Memory.status.address = resolvedURL
+    else Address Invalid
+        MC -> K8S : Update Memory.status.phase = "Error"
+        MC -> K8S : Update Memory.status.message = error
+    end
+    
+    deactivate MC
+end
+deactivate K8S
+
+== Error Handling & Fallback ==
+note over QC, PG
+    Error Scenarios:
+    1. Memory not found: Use "default" memory or NoopMemory
+    2. Memory service unavailable: Query fails with error
+    3. HTTP errors: Tracked via OperationTracker
+    4. Database errors: HTTP 500 response
+    5. Session isolation: Each Query UID = unique session
+end note
+
+== Session Management ==
+note over PMS, PG
+    Session Isolation:
+    - sessionId = Query.metadata.uid (unique per query)
+    - Messages stored per session in PostgreSQL
+    - Sessions prevent conversation mixing
+    - Conversations persist across pod restarts
+    
+    Database Schema (ark_messages):
+    - session_id VARCHAR PRIMARY KEY
+    - message JSONB (OpenAI format)
+    - created_at TIMESTAMP (ordering)
+end note
+
+== Memory Types ==
+note over MI, HM
+    Memory Implementations:
+    
+    1. HTTPMemory:
+       - Production implementation
+       - HTTP API with PostgreSQL backend
+       - Session-based persistence
+       - Retry logic & error handling
+    
+    2. NoopMemory:
+       - Development/testing
+       - No persistence (discards messages)
+       - Always returns empty history
+    
+    Interface: AddMessages(), GetMessages(), Close()
+end note
+
+@enduml

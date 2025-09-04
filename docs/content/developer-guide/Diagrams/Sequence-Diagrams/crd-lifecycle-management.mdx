@@ -1,0 +1,251 @@
+# CRD Lifecycle Management - Sequence Diagram
+
+This document explains the sequence diagram for **CRD Lifecycle Management** in ARK, showing how Custom Resource Definitions are managed through their complete lifecycle from creation to deletion. ARK uses the Kubernetes controller pattern to manage various CRDs including Agents, Teams, Models, Tools, MCPServers, Memory, and Queries.
+
+## System Overview
+
+### Key Participants
+
+1. **User** - Creates, updates, or deletes CRD instances
+2. **Kubernetes API Server** - Validates and stores CRD instances
+3. **Controller Manager** - ARK's controller manager process
+4. **CRD Controller** - Specific controller for each CRD type (Agent, Query, Model, etc.)
+5. **Admission Webhooks** - Validate CRD specifications before storage
+6. **EventRecorder** - Records events for observability and debugging
+7. **External Resources** - Services, secrets, configmaps that CRDs depend on
+8. **Status Reporter** - Updates CRD status with current state
+
+### CRD Types in ARK
+
+The system manages several CRD types, each with their own controller:
+
+1. **Agent** - AI agents with prompts, models, and tools
+2. **Team** - Groups of agents with coordination strategies  
+3. **Model** - Language model configurations
+4. **Tool** - Individual tools and functions
+5. **MCPServer** - Model Context Protocol servers for tool discovery
+6. **Memory** - Conversation storage systems
+7. **Query** - User requests to agents/teams
+8. **Evaluator** - Evaluation configurations
+
+### Lifecycle Phases
+
+Each CRD follows a standard lifecycle with status phases:
+- **Pending** - Initial state, not yet processed
+- **Running** - Controller is processing the resource
+- **Ready** - Resource is fully configured and operational
+- **Error** - Configuration or processing errors occurred
+
+## Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant KubernetesAPI as Kubernetes API Server
+    participant AdmissionWebhook as Admission Webhook
+    participant ControllerManager as Controller Manager
+    participant CRDController as CRD Controller
+    participant EventRecorder as Event Recorder
+    participant ExternalResource as External Resource
+    participant StatusReporter as Status Reporter
+
+    Note over User, StatusReporter: CRD Lifecycle Management
+
+    %% Phase 1: Resource Creation
+    User->>KubernetesAPI: Create CRD instance (kubectl apply)
+    KubernetesAPI->>AdmissionWebhook: Validate CRD specification
+    AdmissionWebhook->>AdmissionWebhook: Check required fields, references, constraints
+    
+    alt Validation Success
+        AdmissionWebhook-->>KubernetesAPI: Validation passed
+        KubernetesAPI->>KubernetesAPI: Store CRD in etcd
+        KubernetesAPI->>ControllerManager: Watch event: CRD created
+        KubernetesAPI-->>User: Resource created successfully
+    else Validation Failure
+        AdmissionWebhook-->>KubernetesAPI: Validation failed (error details)
+        KubernetesAPI-->>User: HTTP 400 - Validation error
+    end
+
+    %% Phase 2: Controller Reconciliation Trigger
+    ControllerManager->>CRDController: Reconcile(namespacedName)
+    CRDController->>KubernetesAPI: Get CRD instance
+    KubernetesAPI-->>CRDController: CRD object data
+    
+    %% Phase 3: Status Initialization
+    CRDController->>CRDController: Check current status phase
+    
+    alt First Reconciliation (empty status)
+        CRDController->>EventRecorder: Record "Initializing" event
+        CRDController->>StatusReporter: Update status to "Running"
+        StatusReporter->>KubernetesAPI: Update CRD status
+        KubernetesAPI->>ControllerManager: Watch event: Status updated
+        ControllerManager->>CRDController: Reconcile(namespacedName) - triggered by status change
+    end
+
+    %% Phase 4: Resource Processing
+    CRDController->>CRDController: Process CRD specification
+    
+    alt External Resource Dependencies
+        CRDController->>ExternalResource: Resolve external references (secrets, services, configmaps)
+        ExternalResource-->>CRDController: Configuration data
+        
+        alt Resource Resolution Success
+            CRDController->>CRDController: Apply resolved configuration
+            CRDController->>EventRecorder: Record "Configured" event
+        else Resource Resolution Failure
+            CRDController->>EventRecorder: Record "ConfigurationError" event
+            CRDController->>StatusReporter: Update status to "Error"
+            StatusReporter->>KubernetesAPI: Update CRD status with error details
+        end
+    end
+
+    %% Phase 5: Derived Resource Creation
+    alt CRD Creates Derived Resources (e.g., MCPServer → Tools)
+        CRDController->>CRDController: Generate derived resource specifications
+        CRDController->>KubernetesAPI: Create derived resources with owner references
+        KubernetesAPI->>KubernetesAPI: Store derived resources
+        KubernetesAPI->>ControllerManager: Watch events: Derived resources created
+        CRDController->>EventRecorder: Record "DerivedResourcesCreated" event
+    end
+
+    %% Phase 6: Success State
+    alt Processing Success
+        CRDController->>EventRecorder: Record "Ready" event
+        CRDController->>StatusReporter: Update status to "Ready"
+        StatusReporter->>KubernetesAPI: Update CRD status
+        KubernetesAPI-->>User: CRD fully operational (kubectl get status)
+    end
+
+    %% Phase 7: Update Handling
+    Note over User, StatusReporter: Resource Update Scenario
+    User->>KubernetesAPI: Update CRD specification (kubectl apply)
+    KubernetesAPI->>AdmissionWebhook: Validate updated specification
+    AdmissionWebhook-->>KubernetesAPI: Validation result
+    KubernetesAPI->>ControllerManager: Watch event: CRD updated
+    ControllerManager->>CRDController: Reconcile(namespacedName)
+    CRDController->>CRDController: Detect specification changes
+    CRDController->>EventRecorder: Record "Updating" event
+    CRDController->>CRDController: Apply configuration changes
+    CRDController->>StatusReporter: Update status with new state
+    StatusReporter->>KubernetesAPI: Update CRD status
+
+    %% Phase 8: Deletion Handling
+    Note over User, StatusReporter: Resource Deletion Scenario
+    User->>KubernetesAPI: Delete CRD instance (kubectl delete)
+    KubernetesAPI->>KubernetesAPI: Add deletion timestamp and finalizers
+    KubernetesAPI->>ControllerManager: Watch event: CRD marked for deletion
+    ControllerManager->>CRDController: Reconcile(namespacedName)
+    CRDController->>CRDController: Handle finalizer cleanup
+    
+    alt Has Dependent Resources
+        CRDController->>KubernetesAPI: Delete dependent resources (owner references)
+        KubernetesAPI->>KubernetesAPI: Garbage collect dependent resources
+        CRDController->>EventRecorder: Record "CleanupCompleted" event
+    end
+    
+    CRDController->>KubernetesAPI: Remove finalizers
+    KubernetesAPI->>KubernetesAPI: Delete CRD instance from etcd
+    KubernetesAPI-->>User: Resource deleted successfully
+
+    Note over User, StatusReporter: Lifecycle Completed
+```
+
+## Lifecycle Management Phases
+
+### Phase 1: Resource Creation and Validation
+- **User action**: Creates a new CRD instance using `kubectl apply` or API calls
+- **Admission validation**: Webhooks validate the specification against ARK's business rules
+- **Storage**: Valid resources are stored in etcd via the Kubernetes API Server
+- **Watch trigger**: Controller Manager detects the new resource and triggers reconciliation
+
+### Phase 2: Controller Reconciliation Initialization
+- **Reconcile trigger**: The appropriate CRD controller receives a reconciliation request
+- **Resource fetch**: Controller retrieves the current state of the CRD from Kubernetes API
+- **State assessment**: Controller examines the current status phase to determine required actions
+
+### Phase 3: Status Initialization and State Machine
+- **Initial state**: New resources start without status information
+- **Status initialization**: Controller sets initial status phase (typically "Running")  
+- **State machine**: Each controller implements a status-based state machine for processing
+
+### Phase 4: Resource Processing and Configuration
+- **Specification processing**: Controller processes the CRD's desired configuration
+- **External dependencies**: Resolves references to secrets, configmaps, services, or other resources
+- **Configuration application**: Applies the resolved configuration to make the resource operational
+- **Error handling**: Failed configurations result in "Error" status with detailed error messages
+
+### Phase 5: Derived Resource Management
+- **Resource generation**: Some CRDs create child resources (e.g., MCPServer creates Tool resources)
+- **Owner references**: Child resources are linked to parent via Kubernetes owner references
+- **Cascade deletion**: When parent is deleted, Kubernetes automatically garbage collects children
+- **Event recording**: All derived resource creation activities are recorded for observability
+
+### Phase 6: Ready State and Operation
+- **Operational state**: Successfully configured resources transition to "Ready" status
+- **Continuous monitoring**: Controllers continue to watch for changes and maintain desired state
+- **Status reporting**: Current state is continuously reported through Kubernetes status fields
+
+### Phase 7: Update and Change Management
+- **Change detection**: Controllers detect when CRD specifications are modified
+- **Incremental updates**: Only changed aspects are reconfigured, minimizing disruption
+- **Status transitions**: Resources may temporarily return to "Running" during updates
+- **Change validation**: Updates go through the same admission webhook validation process
+
+### Phase 8: Deletion and Cleanup
+- **Deletion marker**: Kubernetes adds deletion timestamp when user requests deletion
+- **Finalizer processing**: Controllers handle cleanup through finalizers before actual deletion
+- **Dependent cleanup**: All dependent resources are cleaned up through owner references
+- **Final removal**: Resources are removed from etcd after all cleanup is completed
+
+## Controller Implementation Patterns
+
+### Standard Controller Structure
+```go
+type ResourceReconciler struct {
+    client.Client
+    Scheme   *runtime.Scheme
+    Recorder record.EventRecorder
+}
+
+func (r *ResourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+    // 1. Fetch resource
+    // 2. Handle deletion (finalizers)
+    // 3. Process based on status phase
+    // 4. Update status
+    return ctrl.Result{}, nil
+}
+```
+
+### Status Phase State Machine
+ARK controllers follow a consistent status phase pattern:
+- **""** (empty) → **"Running"**: Initial state transition
+- **"Running"** → **"Ready"**: Successful configuration completion
+- **"Running"** → **"Error"**: Configuration failures
+- **"Ready"** → **"Running"**: Triggered by specification changes
+- **"Error"** → **"Running"**: Retry after error resolution
+
+### Event Recording and Observability
+- **Event types**: Normal events for successful operations, Warning events for errors
+- **Event reasons**: Structured reason codes like "Configured", "Ready", "ValidationFailed"
+- **Event messages**: Human-readable descriptions of what occurred
+- **Metrics integration**: Controllers emit metrics for monitoring and alerting
+
+## Error Handling and Recovery
+
+### Validation Errors
+- **Admission webhook rejection**: Invalid specifications are rejected before storage
+- **Field validation**: Required fields, format validation, and business rule enforcement
+- **Reference validation**: Ensures referenced resources exist and are accessible
+
+### Runtime Errors
+- **External resource failures**: Handling of missing secrets, services, or external dependencies
+- **Network failures**: Retry logic for transient network issues
+- **Resource conflicts**: Handling of resource creation conflicts and race conditions
+
+### Recovery Mechanisms
+- **Automatic retry**: Controllers automatically retry failed operations
+- **Status reporting**: Clear error messages help users understand and fix issues
+- **Event emission**: Detailed event history assists in troubleshooting
+
+This comprehensive lifecycle management ensures reliable, observable, and maintainable operation of all ARK CRDs while following Kubernetes best practices and patterns.
+

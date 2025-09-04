@@ -1,0 +1,123 @@
+@startuml langfuse-service
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam sequenceMessageAlign center
+skinparam sequenceGroupHeaderFontSize 12
+skinparam sequenceLifelineStrategy solid
+skinparam participant {
+    backgroundColor #F8F9FA
+    borderColor #DEE2E6
+    fontSize 11
+}
+
+title Langfuse Service - Observability and Tracing Flow
+
+participant "User" as User #E3F2FD
+participant "ARK Controller" as Controller #F3E5F5
+participant "OTEL Collector" as OTEL #E8F5E8
+participant "Langfuse Service" as Langfuse #FFF3E0
+participant "Agent" as Agent #E1F5FE
+participant "Model Client" as ModelClient #F1F8E9
+participant "External LLM Provider" as LLM #FFEBEE
+participant "Langfuse Database" as Database #F9FBE7
+
+note over User, Database : Langfuse Observability and Tracing Flow
+
+== Phase 1: System Initialization and OTEL Configuration ==
+Controller -> Controller : Initialize ARK Controller with OTEL config
+Controller -> OTEL : Configure OTEL headers and endpoint
+OTEL -> Langfuse : Register telemetry endpoint: /api/public/otel
+Langfuse -> Database : Initialize session and project tracking
+
+note over Controller, Database : Startup Trace: ARK Controller initialization
+
+== Phase 2: Query Submission and Trace Initiation ==
+User -> Controller : Submit Query CRD
+Controller -> OTEL : StartTrace("QueryExecution", queryId, metadata)
+OTEL -> Langfuse : POST /api/public/otel (Trace start event)
+Langfuse -> Database : Store trace initiation with session info
+
+Controller -> Controller : Process Query CRD and extract requirements
+Controller -> OTEL : AddEvent("QueryProcessed", query details)
+OTEL -> Langfuse : POST /api/public/otel (Query processing event)
+
+== Phase 3: Agent Resolution and Configuration ==
+Controller -> Controller : Resolve target agent configuration
+Controller -> OTEL : AddEvent("AgentResolved", agent metadata)
+Controller -> Agent : Initialize agent with model and prompt
+
+OTEL -> Langfuse : POST /api/public/otel (Agent resolution event)
+Langfuse -> Database : Store agent configuration and metadata
+
+== Phase 4: Model Client Creation and LLM Call Preparation ==
+Agent -> ModelClient : Create model client with provider config
+Agent -> OTEL : StartSpan("LLMCall", model details, prompt)
+OTEL -> Langfuse : POST /api/public/otel (LLM call initiation)
+
+Agent -> Agent : Prepare prompt and messages for LLM
+Agent -> OTEL : AddEvent("PromptPrepared", prompt tokens, content)
+
+== Phase 5: LLM Provider Interaction and Token Tracking ==
+ModelClient -> LLM : HTTP request to LLM provider (OpenAI, Azure, etc.)
+ModelClient -> OTEL : AddEvent("LLMRequestSent", request details)
+
+LLM --> ModelClient : AI response with content and usage metadata
+ModelClient -> OTEL : AddEvent("LLMResponseReceived", tokens, cost)
+
+== Phase 6: Response Processing and Metrics Collection ==
+ModelClient --> Agent : LLM response with token usage
+Agent -> OTEL : EndSpan("LLMCall", response tokens, duration)
+Agent -> OTEL : AddMetrics("TokenUsage", prompt_tokens, completion_tokens)
+
+OTEL -> Langfuse : POST /api/public/otel (LLM completion with metrics)
+Langfuse -> Database : Store LLM interaction, tokens, and cost data
+
+== Phase 7: Query Completion and Final Tracing ==
+Agent --> Controller : Return processed response
+Controller -> OTEL : AddEvent("QueryCompleted", response details)
+Controller -> OTEL : EndTrace("QueryExecution", final_status)
+
+OTEL -> Langfuse : POST /api/public/otel (Query completion event)
+Langfuse -> Database : Finalize trace and session data
+
+Controller --> User : Return query response
+
+== Phase 8: Analytics and Dashboard Updates ==
+Langfuse -> Database : Aggregate metrics and performance data
+Langfuse -> Langfuse : Update dashboard views
+note over Langfuse : - Traces view with execution flow\n- Sessions view with conversation history\n- Models view with usage statistics\n- Cost analysis and token breakdowns
+
+== Phase 9: Error Handling and Monitoring ==
+alt LLM Provider Error
+    ModelClient -> LLM : Request to LLM provider
+    LLM --> ModelClient : Error response (rate limit, API error, etc.)
+    ModelClient -> OTEL : AddEvent("LLMError", error details)
+    OTEL -> Langfuse : POST /api/public/otel (Error event)
+    Langfuse -> Database : Store error information for debugging
+    ModelClient --> Agent : Error response
+    Agent -> OTEL : EndSpan("LLMCall", error_status)
+else Controller Processing Error
+    Controller -> Controller : Exception in query processing
+    Controller -> OTEL : AddEvent("ControllerError", error details)
+    OTEL -> Langfuse : POST /api/public/otel (Controller error)
+    Langfuse -> Database : Store controller error for monitoring
+    Controller -> OTEL : EndTrace("QueryExecution", error_status)
+else OTEL Collection Error
+    OTEL -> Langfuse : POST /api/public/otel (telemetry data)
+    Langfuse --> OTEL : Error response (service unavailable)
+    OTEL -> OTEL : Buffer telemetry data for retry
+    note over OTEL : Retry with exponential backoff
+end
+
+== Phase 10: Continuous Monitoring and Health Checks ==
+note over Controller, Database : Continuous Monitoring and Health
+Controller -> OTEL : Periodic health check events
+OTEL -> Langfuse : POST /api/public/otel (Health status)
+Langfuse -> Database : Update service health metrics
+
+Langfuse -> Langfuse : Generate alerts for:
+note over Langfuse : - High error rates\n- Performance degradation\n- Cost threshold breaches\n- Token usage anomalies
+
+note over User, Database : Complete Langfuse Observability Flow
+
+@enduml

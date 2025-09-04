@@ -1,0 +1,248 @@
+# ARK Platform - Logical Architecture
+
+Code Version: v0.1.31  
+Last updated on September 4, 2025
+
+This document presents the comprehensive logical architecture of the ARK (Agents at Scale) platform, showing the layered structure and component interactions that enable scalable AI agent orchestration.
+
+## Architecture Overview
+
+The ARK platform is organized into distinct layers, each with specific responsibilities and clear separation of concerns. This architecture enables scalability, maintainability, and flexibility in AI agent deployment and management.
+
+```mermaid
+graph TB
+    %% User Layer
+    subgraph "Frontend/Interfaces Layer"
+        User[Client/User]
+        WD[Web Dashboard<br/>SPA Framework]
+        CLI[Command Line Interface<br/>Interactive Terminal]
+        DP[Documentation Portal<br/>API Reference]
+    end
+
+    %% Presentation Layer
+    subgraph "Presentation Layer"
+        Auth[Authentication Service<br/>OAuth + JWT + RBAC]
+        SDK[Client SDK<br/>Multi-language Libraries]
+        SC[Shared Components<br/>Framework Bridge]
+        OP[Observability Platform<br/>Trace Analytics]
+    end
+
+    %% Integration Layer
+    subgraph "Integration Layer"
+        subgraph "Application Services Layer"
+            A2A[A2A Gateway<br/>Agent-to-Agent Communication]
+        end
+        subgraph "OTL provider layer"
+            OTL[OTL Provider Layer]
+        end
+    end
+
+    %% Core Business Logic
+    subgraph "CORE Layer"
+        subgraph "Business Logic Layer"
+            QE[Query Engine<br/>Natural Language Processing<br/>Intent Recognition]
+            MM[Model Manager<br/>LLM Abstraction<br/>Provider Switching]
+            TM[Tool Manager<br/>Dynamic Tool Loading<br/>Execution Sandbox]
+            EV[Evaluation Engine<br/>LLM-as-a-Judge<br/>Performance Metrics]
+        end
+    end
+
+    %% Data Layer
+    subgraph "Data Layer"
+        subgraph "Application Persistence Layer"
+            AMS[Agent Memory Service<br/>Conversation History]
+            AMStore[Agent Memory Store<br/>Vector Embeddings + Semantic Search]
+        end
+        subgraph "Configuration & Security Layer"
+            CS[Configuration Store<br/>Environment Config]
+            SM[Secret Manager<br/>Credential Storage]
+        end
+    end
+
+    %% Monitoring Layer
+    subgraph "Monitoring Layer"
+        subgraph "Application Persistence Layer"
+            PROM[Prometheus<br/>Metrics Collection + Custom Metrics]
+        end
+    end
+
+    %% User Interactions
+    User <--> WD
+    User <--> CLI
+    User <--> DP
+
+    %% Frontend to Presentation
+    WD --> Auth
+    CLI --> Auth
+    WD --> SDK
+    CLI --> SDK
+
+    %% Presentation to Integration
+    Auth --> A2A
+    SDK --> QE
+    SDK --> TM
+    SDK --> MM
+    SC --> OTL
+
+    %% Integration to Core
+    A2A --> QE
+    OTL --> SC
+
+    %% Core Internal Connections
+    QE --> MM
+    QE --> TM
+    MM --> AMS
+    TM --> SM
+    EV --> PROM
+
+    %% Core to Data
+    QE --> AMStore
+    MM --> CS
+
+    %% Styling - Matching original design
+    classDef frontend fill:#f5f5f5,stroke:#666,stroke-width:2px,color:#000
+    classDef presentation fill:#f5f5f5,stroke:#666,stroke-width:2px,color:#000
+    classDef integration fill:#f5f5f5,stroke:#666,stroke-width:2px,color:#000
+    classDef core fill:#f5f5f5,stroke:#666,stroke-width:2px,color:#000
+    classDef data fill:#f5f5f5,stroke:#666,stroke-width:2px,color:#000
+    classDef monitoring fill:#f5f5f5,stroke:#666,stroke-width:2px,color:#000
+    classDef components fill:#f1f3f4,stroke:#999,stroke-width:1px,color:#000
+
+    class User,WD,CLI,DP frontend
+    class Auth,SDK,SC,OP presentation
+    class A2A,OTL integration
+    class QE,MM,TM,EV core
+    class AMS,AMStore,CS,SM data
+    class PROM monitoring
+    class Auth,SDK,SC,OP,A2A,OTL,QE,MM,TM,EV,AMS,AMStore,CS,SM,PROM components
+```
+
+## Layer Descriptions
+
+### 🖥️ Frontend/Interfaces Layer
+- **Web Dashboard**: React-based SPA for visual agent management and monitoring
+- **Command Line Interface**: Interactive terminal for developers and operators
+- **Documentation Portal**: API reference and comprehensive guides
+
+### 🔗 Presentation Layer
+- **Authentication Service**: OAuth 2.0, JWT tokens, and RBAC authorization
+- **Client SDK**: Multi-language libraries (Python, TypeScript, Go)
+- **OTL Provider**: OpenTelemetry integration for distributed tracing
+- **Observability Platform**: Real-time monitoring and analytics dashboard
+
+### 🌐 Integration Layer
+- **A2A Gateway**: Agent-to-Agent communication with message routing
+- **MCP Integration**: Model Context Protocol for standardized tool access
+- **External Execution Layer**: Langchain and custom execution engine support
+- **API Gateway**: Centralized request routing and rate limiting
+
+### 🧠 Core Layer - Business Logic
+
+#### Query Engine
+- **Natural Language Processing**: Intent recognition and query parsing
+- **Context Management**: Maintains conversation context across interactions
+- **Query Routing**: Directs queries to appropriate agents or teams
+
+#### Team Orchestration Engine
+- **Team Strategy Manager**: Round-robin, sequential, and custom strategies
+- **Agent Assignment Logic**: Intelligent agent selection based on capabilities
+- **Team Execution Coordinator**: Manages multi-agent workflows
+
+#### Tool Manager
+- **Dynamic Tool Loading**: Runtime tool discovery and registration
+- **Execution Sandbox**: Secure tool execution environment
+- **Tool Registry**: Centralized catalog of available tools and capabilities
+
+#### Model Manager
+- **LLM Abstraction**: Unified interface across different LLM providers
+- **Provider Switching**: Dynamic model selection based on requirements
+- **Load Balancing**: Distributes requests across available model instances
+
+#### Event System
+- **Operation Tracker**: Tracks all system operations with unique IDs
+- **Event Recorder**: Kubernetes-native event logging
+- **Event Analytics**: Real-time event analysis and alerting
+
+#### Evaluation Engine
+- **LLM-as-a-Judge**: Automated quality assessment of agent responses
+- **Performance Metrics**: Response time, accuracy, and resource utilization
+- **Continuous Improvement**: Feedback loops for model and agent optimization
+
+### 💾 Data Layer - Application Persistence
+
+#### Agent Memory Service
+- **Conversation History**: Persistent storage of agent interactions
+- **Context Management**: Long-term and short-term memory management
+- **Semantic Search**: Vector-based retrieval of relevant context
+
+#### Configuration Management
+- **Environment Configuration**: Environment-specific settings and parameters
+- **Secret Management**: Secure storage of API keys and credentials
+- **Dynamic Configuration**: Runtime configuration updates without restarts
+
+### 📊 Monitoring Layer
+
+#### Prometheus Integration
+- **Metrics Collection**: System and business metrics aggregation
+- **Custom Metrics**: Agent-specific performance indicators
+- **Alerting**: Threshold-based alerts and notifications
+
+#### Langfuse Service
+- **LLM Observability**: Token usage, latency, and cost tracking
+- **Performance Analytics**: Model performance analysis and optimization
+- **Usage Patterns**: Understanding of agent and model utilization
+
+#### Distributed Tracing
+- **Request Correlation**: End-to-end request tracing across services
+- **Performance Profiling**: Bottleneck identification and optimization
+- **Error Tracking**: Comprehensive error logging and analysis
+
+## Key Architectural Principles
+
+### 🔄 **Scalability**
+- **Horizontal Scaling**: All components designed for horizontal scaling
+- **Load Distribution**: Intelligent load balancing across instances
+- **Resource Optimization**: Efficient resource utilization and auto-scaling
+
+### 🛡️ **Security**
+- **Zero Trust Architecture**: Authentication and authorization at every layer
+- **Secret Management**: Centralized and encrypted credential storage
+- **Network Isolation**: Secure communication between components
+
+### 🔍 **Observability**
+- **Comprehensive Monitoring**: Full-stack observability from infrastructure to business logic
+- **Distributed Tracing**: End-to-end request tracking and performance analysis
+- **Event-Driven Analytics**: Real-time insights into system behavior
+
+### 🔧 **Maintainability**
+- **Clean Separation**: Clear boundaries between layers and components
+- **API-First Design**: Well-defined interfaces for all interactions
+- **Configuration Management**: Externalized configuration for flexibility
+
+### 🚀 **Extensibility**
+- **Plugin Architecture**: Support for custom tools and execution engines
+- **Provider Abstraction**: Easy integration of new LLM providers
+- **Open Standards**: Support for industry standards like MCP and OpenTelemetry
+
+## Component Interactions
+
+### Request Flow
+1. **User Request** → Frontend Layer → Authentication
+2. **Authenticated Request** → API Gateway → Core Logic
+3. **Business Processing** → Query Engine → Team Orchestration
+4. **Agent Execution** → Tool Manager → External Tools
+5. **Response Processing** → Event Recording → User Response
+
+### Data Flow
+1. **Configuration Data** → Configuration Store → Core Components
+2. **Memory Data** → Agent Memory Service → Vector Store
+3. **Metrics Data** → Prometheus → Observability Platform
+4. **Event Data** → Event System → Monitoring Layer
+
+### Monitoring Flow
+1. **System Metrics** → Prometheus → Alerting
+2. **LLM Metrics** → Langfuse → Analytics
+3. **Trace Data** → OpenTelemetry → Distributed Tracing
+4. **Events** → Event Recorder → Real-time Monitoring
+
+This architecture provides a robust, scalable, and maintainable foundation for the ARK platform, enabling efficient management and orchestration of AI agents at scale while maintaining high observability and security standards.

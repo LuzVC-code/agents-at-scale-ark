@@ -1,0 +1,75 @@
+name: Update Sequence Diagrams
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'ark/internal/**'
+      - 'ark/cmd/**'
+      - 'services/**'
+      - 'docs/sequence-diagrams/generate-sequence-diagrams/*.puml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'ark/internal/**'
+      - 'ark/cmd/**'
+      - 'services/**'
+
+jobs:
+  update-diagrams:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: Download PlantUML
+      run: |
+        curl -L -o plantuml.jar https://github.com/plantuml/plantuml/releases/download/v1.2024.8/plantuml-1.2024.8.jar
+
+    - name: Generate PNG Images
+      run: |
+        cd docs/sequence-diagrams/generate-sequence-diagrams
+        java -jar ../../../plantuml.jar -tpng *.puml
+        
+        # Copy images to content directory
+        mkdir -p ../../content/developer-guide/images/sequence-diagrams/
+        cp *.png ../../content/developer-guide/images/sequence-diagrams/
+        
+        # Copy images to public directory  
+        mkdir -p ../../public/images/sequence-diagrams/
+        cp *.png ../../public/images/sequence-diagrams/
+        
+        # Rename specific files for consistency
+        cd ../../public/images/sequence-diagrams/
+        [ -f "memory-service-operations.png" ] && mv "memory-service-operations.png" "memory-service.png"
+        [ -f "tool-execution-flow.png" ] && mv "tool-execution-flow.png" "tool-execution.png"
+
+    - name: Update MDX files with latest diagrams
+      run: |
+        # Update watermarks using the automated script
+        chmod +x scripts/update-watermarks.sh
+        ./scripts/update-watermarks.sh
+
+    - name: Commit and push changes
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add docs/content/developer-guide/images/sequence-diagrams/*.png
+        git add docs/public/images/sequence-diagrams/*.png
+        git add docs/content/developer-guide/Diagrams/Sequence-Diagrams/*.mdx
+        
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+        else
+          git commit -m "🔄 Auto-update sequence diagrams [skip ci]"
+          git push
+        fi

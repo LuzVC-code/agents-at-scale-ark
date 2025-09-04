@@ -1,0 +1,37 @@
+#!/bin/bash
+# Pre-commit hook to update sequence diagrams
+
+set -e
+
+echo "🔍 Checking for PlantUML changes..."
+
+# Check if any .puml files were modified
+PUML_FILES=$(git diff --cached --name-only --diff-filter=AM | grep '\.puml$' || true)
+
+if [ -n "$PUML_FILES" ]; then
+    echo "📝 PlantUML files modified: $PUML_FILES"
+    echo "🔄 Regenerating sequence diagrams..."
+    
+    # Run diagram update
+    make -f docs/Makefile.diagrams update-diagrams
+    
+    # Add generated images to commit
+    git add docs/content/developer-guide/images/sequence-diagrams/*.png
+    git add docs/public/images/sequence-diagrams/*.png
+    
+    # Add updated MDX files with new watermarks
+    git add docs/content/developer-guide/Diagrams/Sequence-Diagrams/*.mdx
+    
+    echo "✅ Sequence diagrams updated and added to commit"
+else
+    echo "✅ No PlantUML changes detected"
+fi
+
+# Check for code changes that might affect diagrams
+CODE_CHANGES=$(git diff --cached --name-only | grep -E '\.(go|ts|js|py)$' | grep -E '(internal|cmd|services)' || true)
+
+if [ -n "$CODE_CHANGES" ]; then
+    echo "⚠️  Code changes detected that might affect sequence diagrams:"
+    echo "$CODE_CHANGES"
+    echo "💡 Consider updating relevant PlantUML files in docs/sequence-diagrams/generate-sequence-diagrams/"
+fi
